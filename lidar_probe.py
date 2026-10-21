@@ -11,12 +11,13 @@ lidar_probe.py — เครื่องมือหา protocol ของ lidar
   ห้ามต่อมอเตอร์เข้า GPIO ตรง
 
 ติดตั้ง:
-  sudo apt install -y python3-serial python3-gpiozero
+  sudo apt install -y python3-serial python3-gpiozero python3-matplotlib python3-numpy
 
 คำสั่ง:
   python3 lidar_probe.py scan                        # ไล่ baud rate หา protocol อัตโนมัติ (เริ่มที่นี่)
   python3 lidar_probe.py dump  -b 115200             # ดูข้อมูลดิบเป็น hex
   python3 lidar_probe.py live  -b 115200 -p neato    # ถอดค่าระยะ real-time เมื่อรู้ protocol แล้ว
+  python3 lidar_probe.py plot  -b 115200 -p neato    # ภาพ 2D real-time (ต้องมีหน้าจอ/VNC ไม่งั้นบันทึก PNG)
   python3 lidar_probe.py cmdprobe -b 115200          # ส่งคำสั่งแบบ RPLIDAR/YDLIDAR (กรณี lidar ไม่ส่งข้อมูลเอง)
   python3 lidar_probe.py analyze captures/raw_115200.bin   # วิเคราะห์ไฟล์ที่บันทึกไว้
 
@@ -574,6 +575,133 @@ def cmd_cmdprobe(args, motor):
             print(f"ลอง: python3 {sys.argv[0]} live -b {args.baud} -p rplidar")
 
 
+# =====================================================================
+# ภาพ 2D (matplotlib)
+# =====================================================================
+def _plot_setup(max_range, title):
+    import matplotlib
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig = plt.figure(figsize=(7, 7))
+    ax = fig.add_subplot(projection="polar")
+    ax.set_theta_zero_location("N")   # 0° ชี้ขึ้น
+    ax.set_theta_direction(-1)        # หมุนตามเข็มนาฬิกา
+    ax.set_rmax(max_range)
+    ax.set_rlabel_position(135)
+    ax.set_title(title)
+    sc = ax.scatter([], [], s=6, c=[], cmap="turbo", vmin=0, vmax=max_range)
+    fig.colorbar(sc, ax=ax, shrink=0.7, pad=0.08, label="distance (mm)")
+    return plt, fig, ax, sc
+
+
+def _draw(sc, ax, scan, max_range):
+    import math
+    import numpy as np
+    pts = [(math.radians(a), d) for a, (d, _) in scan.items() if 0 < d <= max_range]
+    if pts:
+        arr = np.array(pts)
+        sc.set_offsets(arr)
+        sc.set_array(arr[:, 1])
+    else:
+        sc.set_offsets(np.empty((0, 2)))
+        sc.set_array(np.empty(0))
+    ax.set_rmax(max_range)
+
+
+def cmd_plot(args, motor):
+    import threading
+    name, fn, _ = LIVE_PROTOCOLS[args.proto]
+    headless = not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
+    png = args.png or ("scan.png" if headless else None)
+    if headless and not args.png:
+        print("ไม่พบหน้าจอ (ต่อผ่าน SSH?) → จะบันทึกเป็นไฟล์ scan.png แทน")
+
+    scan = {}  # มุม(ละเอียด 0.5°) -> (ระยะ mm, เวลา)
+    state = {"rpm": None}
+
+    def feed(pkts, now):
+        for _, rpm, pts in pkts:
+            if rpm:
+                state["rpm"] = rpm
+            for a, d, s in pts:
+                scan[(round(a * 2) / 2) % 360] = (d, now)
+
+    # ---- วาดจากไฟล์ที่บันทึกไว้ ----
+    if args.file:
+        with open(args.file, "rb") as f:
+            pkts, _, _ = fn(f.read())
+        feed(pkts, time.time())
+        plt, fig, ax, sc = _plot_setup(args.max_range, f"{args.file}  ({len(scan)} pts)")
+        _draw(sc, ax, scan, args.max_range)
+        out = png or None
+        if out:
+            fig.savefig(out, dpi=120)
+            print(f"บันทึกภาพ {len(scan)} จุด ลง {out}")
+        else:
+            plt.show()
+        return
+
+    # ---- อ่านจาก serial ใน thread แยก ----
+    ser = open_port(args.port, args.baud)
+    ser.reset_input_buffer()
+    if args.proto == "rplidar":
+        ser.write(b"\xA5\x20")
+        ser.read(7)
+    lock = threading.Lock()
+    stop = threading.Event()
+
+    def reader():
+        buf = bytearray()
+        while not stop.is_set():
+            buf += ser.read(4096)
+            pkts, _, used = fn(bytes(buf))
+            del buf[:used]
+            with lock:
+                feed(pkts, time.time())
+
+    th = threading.Thread(target=reader, daemon=True)
+    th.start()
+    print(f"plot: {name} @ {args.baud} baud")
+
+    try:
+        if png:
+            time.sleep(args.seconds)
+            with lock:
+                snap = dict(scan)
+            plt, fig, ax, sc = _plot_setup(args.max_range, f"{name.split(' (')[0]}  ({len(snap)} pts)")
+            _draw(sc, ax, snap, args.max_range)
+            fig.savefig(png, dpi=120)
+            print(f"บันทึกภาพ {len(snap)} จุด ลง {png}")
+            return
+
+        from matplotlib.animation import FuncAnimation
+        plt, fig, ax, sc = _plot_setup(args.max_range, "")
+
+        def update(_):
+            now = time.time()
+            with lock:
+                for k in [k for k, (d, t) in scan.items() if now - t > args.persist]:
+                    del scan[k]
+                snap = dict(scan)
+                rpm = state["rpm"]
+            _draw(sc, ax, snap, args.max_range)
+            rpm_s = f"{rpm:.0f}" if rpm else "-"
+            ax.set_title(f"{name.split(' (')[0]}   rpm {rpm_s}   {len(snap)} pts")
+            return (sc,)
+
+        ani = FuncAnimation(fig, update, interval=100, cache_frame_data=False)  # noqa: F841
+        plt.show()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop.set()
+        th.join(timeout=1)
+        if args.proto == "rplidar":
+            ser.write(b"\xA5\x25")
+        ser.close()
+
+
 def cmd_analyze(args, motor):
     with open(args.file, "rb") as f:
         data = f.read()
@@ -609,6 +737,15 @@ def main():
     c = sub.add_parser("cmdprobe", help="ส่งคำสั่ง RPLIDAR/YDLIDAR ทดสอบ")
     c.add_argument("-b", "--baud", type=int, default=115200)
 
+    g = sub.add_parser("plot", help="แสดงภาพ 2D (หน้าจอ หรือบันทึก PNG)")
+    g.add_argument("-b", "--baud", type=int, default=115200)
+    g.add_argument("-p", "--proto", choices=list(LIVE_PROTOCOLS), required=True)
+    g.add_argument("--file", help="วาดจากไฟล์ .bin ที่บันทึกไว้ แทนการอ่าน serial")
+    g.add_argument("--png", help="บันทึกเป็นไฟล์รูป (ใช้อัตโนมัติถ้าไม่มีหน้าจอ)")
+    g.add_argument("--seconds", type=float, default=2.0, help="เวลาเก็บข้อมูลก่อนบันทึก PNG")
+    g.add_argument("--max-range", type=float, default=6000, help="ระยะสูงสุดที่แสดง mm (default 6000)")
+    g.add_argument("--persist", type=float, default=0.5, help="วินาทีที่จุดค้างบนจอ (default 0.5)")
+
     a = sub.add_parser("analyze", help="วิเคราะห์ไฟล์ .bin ที่บันทึกไว้")
     a.add_argument("file")
 
@@ -616,7 +753,7 @@ def main():
     motor = Motor(args.motor_pin, args.duty)
     try:
         {"scan": cmd_scan, "dump": cmd_dump, "live": cmd_live,
-         "cmdprobe": cmd_cmdprobe, "analyze": cmd_analyze}[args.cmd](args, motor)
+         "cmdprobe": cmd_cmdprobe, "plot": cmd_plot, "analyze": cmd_analyze}[args.cmd](args, motor)
     finally:
         motor.stop()
 

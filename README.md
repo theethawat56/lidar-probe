@@ -29,7 +29,7 @@
 git clone https://github.com/theethawat56/lidar-probe.git
 cd lidar-probe
 
-sudo apt install -y python3-serial python3-gpiozero
+sudo apt install -y python3-serial python3-gpiozero python3-matplotlib python3-numpy
 sudo usermod -aG dialout $USER                       # แล้ว logout/login ใหม่
 
 # ถ้าต่อผ่านขา GPIO UART (ถ้าใช้ USB-UART ข้ามส่วนนี้ได้)
@@ -46,10 +46,21 @@ python3 lidar_probe.py --motor-pin 18 scan           # หมุนมอเต�
 python3 lidar_probe.py dump -b 115200                # ดูข้อมูลดิบเป็น hex
 python3 lidar_probe.py live -b 115200 -p neato       # ถอดค่าระยะ real-time
 python3 lidar_probe.py live -b 115200 -p neato --csv scan.csv --motor-pin 18 --target-rpm 300
+python3 lidar_probe.py plot -b 115200 -p neato       # ภาพ 2D real-time (ต้องมีหน้าจอ/VNC)
+python3 lidar_probe.py plot -b 115200 -p neato --png scan.png   # ไม่มีจอ (SSH) → บันทึกเป็นรูป
+python3 lidar_probe.py plot -p neato --file captures/raw_115200.bin  # วาดจากไฟล์ที่บันทึกไว้
 python3 lidar_probe.py cmdprobe -b 115200            # สำหรับรุ่นที่ต้องรับคำสั่งก่อนถึงจะส่งข้อมูล
 python3 lidar_probe.py analyze captures/raw_115200.bin
 python3 lidar_probe.py --port /dev/ttyUSB0 scan      # ถ้าต่อผ่าน USB-UART
 ```
+
+## ภาพ 2D
+
+`plot` วาดจุดแบบ polar: 0° ชี้ขึ้น หมุนตามเข็มนาฬิกา สีตามระยะ
+ปรับได้ด้วย `--max-range 4000` (mm) และ `--persist 1.0` (วินาทีที่จุดค้างบนจอ)
+
+ถ้าใช้ Pi ผ่าน SSH ไม่มีจอ จะบันทึก `scan.png` อัตโนมัติ หรือดูแบบ real-time ได้ด้วย
+VNC (`sudo raspi-config` → Interface → VNC) หรือ `ssh -X`
 
 ## เคล็ดลับ
 
