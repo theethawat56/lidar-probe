@@ -62,12 +62,14 @@ python3 lidar_probe.py --port /dev/ttyUSB0 scan      # ถ้าต่อผ่�
 ```bash
 python3 lidar_probe.py plot -b 115200 -p delta --max-range 3000       # ภาพ real-time
 python3 lidar_probe.py plot -b 115200 -p delta --png scan.png         # บันทึกเป็นรูป
-python3 lidar_probe.py plot -p delta --file lidar.bin --png room.png  # วาดจากไฟล์ที่บันทึกไว้
+python3 lidar_probe.py plot -p delta --file lidar.bin --speed 0.2     # จำลองภาพเคลื่อนไหวจากไฟล์ (ไม่ต้องต่อ lidar)
+python3 lidar_probe.py plot -p delta --file lidar.bin --png room.png  # ภาพนิ่งทุกจุดจากไฟล์
 python3 lidar_probe.py live -b 115200 -p delta                        # ตัวเลขระยะ + rpm
 ```
 
 
-`plot` วาดจุดแบบ polar: 0° ชี้ขึ้น หมุนตามเข็มนาฬิกา สีตามระยะ
+`plot` วาดจุดแบบ polar: 0° ชี้ขึ้น หมุนตามเข็มนาฬิกา สีตามระยะ เส้นสีแดงคือมุมที่ lidar กำลังวัดอยู่
+`--speed` ใช้กับ `--file` เพื่อปรับความเร็วการจำลอง (1.0 = เวลาจริง 300 rpm, 0.2 = ช้าลง 5 เท่า)
 ปรับได้ด้วย `--max-range 4000` (mm) และ `--persist 1.0` (วินาทีที่จุดค้างบนจอ)
 
 ถ้าใช้ Pi ผ่าน SSH ไม่มีจอ จะบันทึก `scan.png` อัตโนมัติ หรือดูแบบ real-time ได้ด้วย
