@@ -312,6 +312,11 @@ def score(buf):
     return min(g, 0.99), None, kr
 
 
+def hx(data):
+    """bytes -> 'AA 55 01' (ใช้ได้กับ Python 3.7 ซึ่ง bytes.hex(sep) ยังไม่มี)"""
+    return " ".join(f"{b:02X}" for b in data)
+
+
 def hexdump(buf, width=16, limit=None):
     data = buf if limit is None else buf[:limit]
     lines = []
@@ -362,9 +367,9 @@ def report(buf, label="", seconds=None):
             print(f"   0x{b:02X}   {g:5d}      {cover * 100:5.1f}%    0x{nb:02X} ({nr * 100:.0f}%)")
     if gs["period"]:
         hdr = gs["header"]
-        print(f" → ความยาวแพ็กเก็ตน่าจะเป็น {gs['period']} byte, header น่าจะเป็น {hdr.hex(' ').upper()}")
+        print(f" → ความยาวแพ็กเก็ตน่าจะเป็น {gs['period']} byte, header น่าจะเป็น {hx(hdr)}")
         start = buf.find(hdr)
-        print(f"\n ตัวอย่างแพ็กเก็ต เรียงให้ตรงกันที่ header {hdr.hex(' ').upper()}:")
+        print(f"\n ตัวอย่างแพ็กเก็ต เรียงให้ตรงกันที่ header {hx(hdr)}:")
         p = gs["period"]
         for k in range(6):
             seg = buf[start + k * p:start + (k + 1) * p]
@@ -477,7 +482,7 @@ def cmd_live(args, motor):
     if args.proto == "rplidar":
         ser.write(b"\xA5\x20")
         desc = ser.read(7)
-        print("RPLIDAR descriptor:", desc.hex(" "))
+        print("RPLIDAR descriptor:", hx(desc))
     print(f"live: {name} @ {args.baud} baud (Ctrl+C เพื่อหยุด)")
     csv = open(args.csv, "w") if args.csv else None
     if csv:
@@ -555,7 +560,7 @@ def cmd_cmdprobe(args, motor):
         resp = ser.read(max(expect, 64))
         hit = resp.find(b"\xA5\x5A")
         flag = "✔ ตอบกลับแบบ A5 5A" if hit >= 0 else ""
-        print(f" {name:20s} ส่ง {cmd.hex(' ')} → {resp[:32].hex(' ') or '(เงียบ)'} {flag}")
+        print(f" {name:20s} ส่ง {hx(cmd)} → {hx(resp[:32]) or '(เงียบ)'} {flag}")
         if hit >= 0:
             found.append(name)
     for name, cmd in (("RPLIDAR SCAN", b"\xA5\x20"), ("YDLIDAR SCAN", b"\xA5\x60")):
@@ -690,7 +695,10 @@ def cmd_plot(args, motor):
             ax.set_title(f"{name.split(' (')[0]}   rpm {rpm_s}   {len(snap)} pts")
             return (sc,)
 
-        ani = FuncAnimation(fig, update, interval=100, cache_frame_data=False)  # noqa: F841
+        try:
+            ani = FuncAnimation(fig, update, interval=100, cache_frame_data=False)  # noqa: F841
+        except TypeError:  # matplotlib < 3.1
+            ani = FuncAnimation(fig, update, interval=100)  # noqa: F841
         plt.show()
     except KeyboardInterrupt:
         pass
