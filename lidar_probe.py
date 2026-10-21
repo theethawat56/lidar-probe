@@ -193,7 +193,52 @@ def decode_ydlidar(buf):
     return out, bad, i
 
 
-# ---- 4) RPLIDAR standard scan: 5 byte/จุด (ต้องส่งคำสั่ง A5 20 ก่อน, ใช้ใน live/cmdprobe เท่านั้น) ----
+# ---- 4) 3irobotix Delta-2A/2B/2G (lidar หุ่นดูดฝุ่นหลายยี่ห้อ), 115200 baud ----
+# AA | len(2B BE) | ver 01 | type 61 | cmd AD=ข้อมูลระยะ, AE=สถานะ | data len(2B BE) | data | checksum(2B BE)
+# data (cmd AD): speed(1B, x0.05 รอบ/วินาที) | offset angle(2B, 0.01°) | start angle(2B, 0.01°)
+#                | จุดละ 3 byte: quality(1B) + distance(2B BE, หน่วย 0.25 mm)
+# checksum = ผลรวมทุก byte ตั้งแต่ AA จนจบ data (16 บิต)
+DELTA_FRAMES_PER_REV = 16      # แต่ละแพ็กเก็ตครอบคลุม 360/16 = 22.5°
+DELTA_DIST_UNIT_MM = 0.25      # ถ้าวัดจริงแล้วระยะเพี้ยน 4 เท่า ให้เปลี่ยนเป็น 1.0
+
+
+def decode_delta(buf):
+    out, bad, i, n = [], 0, 0, len(buf)
+    span = 360.0 / DELTA_FRAMES_PER_REV
+    while i + 8 <= n:
+        if buf[i] == 0xAA and buf[i + 3] == 0x01 and buf[i + 4] == 0x61:
+            flen = buf[i + 1] << 8 | buf[i + 2]
+            if flen < 8 or flen > 1024:
+                bad += 1
+                i += 1
+                continue
+            if i + flen + 2 > n:
+                break  # แพ็กเก็ตยังมาไม่ครบ
+            p = buf[i:i + flen + 2]
+            if sum(p[:flen]) & 0xFFFF == (p[flen] << 8 | p[flen + 1]):
+                cmd = p[5]
+                dlen = p[6] << 8 | p[7]
+                rpm = p[8] * 0.05 * 60 if dlen >= 1 else None
+                pts = []
+                if cmd == 0xAD and dlen >= 5:
+                    offset = (p[9] << 8 | p[10]) / 100.0
+                    start = (p[11] << 8 | p[12]) / 100.0
+                    npts = (dlen - 5) // 3
+                    for k in range(npts):
+                        o = 13 + 3 * k
+                        d = (p[o + 1] << 8 | p[o + 2]) * DELTA_DIST_UNIT_MM
+                        if d:
+                            ang = start + offset + span * k / npts
+                            pts.append((ang % 360.0, d, p[o]))
+                out.append((i, rpm, pts))
+                i += flen + 2
+                continue
+            bad += 1
+        i += 1
+    return out, bad, i
+
+
+# ---- 5) RPLIDAR standard scan: 5 byte/จุด (ต้องส่งคำสั่ง A5 20 ก่อน, ใช้ใน live/cmdprobe เท่านั้น) ----
 def decode_rplidar(buf):
     out, bad, i, n = [], 0, 0, len(buf)
     pts = []
@@ -217,6 +262,7 @@ PROTOCOLS = {
     "neato":   ("Neato XV-11 / Xiaomi LDS (0xFA, 22B, ปกติ 115200)", decode_neato, 22),
     "ldrobot": ("LDROBOT LD06/LD19/LD14 (0x54 0x2C, 47B, ปกติ 230400 หรือ 115200)", decode_ldrobot, 47),
     "ydlidar": ("YDLIDAR X2/X4 style (0xAA 0x55, ยาวไม่คงที่, ปกติ 115200 หรือ 128000)", decode_ydlidar, None),
+    "delta":   ("3irobotix Delta-2A/2B/2G (AA .. .. 01 61 AD, ปกติ 115200)", decode_delta, None),
 }
 LIVE_PROTOCOLS = dict(PROTOCOLS, rplidar=("RPLIDAR A1/A2 standard scan", decode_rplidar, 5))
 
@@ -290,8 +336,11 @@ def known_results(buf):
         good = len(pkts)
         if plen:
             frac = good * plen / max(1, len(buf))
+        elif good > 1:
+            avg = (pkts[-1][0] - pkts[0][0]) / (good - 1)  # ความยาวเฉลี่ยต่อแพ็กเก็ต
+            frac = good * avg / max(1, len(buf))
         else:
-            frac = sum(10 + 2 * len(p[2]) for p in pkts) / max(1, len(buf))
+            frac = 0.0
         rpms = [p[1] for p in pkts if p[1]]
         npts = sum(len(p[2]) for p in pkts)
         sample = [pt for p in pkts[:50] for pt in p[2]][:8]
@@ -600,10 +649,11 @@ def _plot_setup(max_range, title):
     return plt, fig, ax, sc
 
 
-def _draw(sc, ax, scan, max_range):
+def _draw(sc, ax, points, max_range):
+    """points = [(มุม°, ระยะmm), ...]"""
     import math
     import numpy as np
-    pts = [(math.radians(a), d) for a, (d, _) in scan.items() if 0 < d <= max_range]
+    pts = [(math.radians(a), d) for a, d in points if 0 < d <= max_range]
     if pts:
         arr = np.array(pts)
         sc.set_offsets(arr)
@@ -636,13 +686,14 @@ def cmd_plot(args, motor):
     if args.file:
         with open(args.file, "rb") as f:
             pkts, _, _ = fn(f.read())
-        feed(pkts, time.time())
-        plt, fig, ax, sc = _plot_setup(args.max_range, f"{args.file}  ({len(scan)} pts)")
-        _draw(sc, ax, scan, args.max_range)
+        allpts = [(a, d) for _, _, pts in pkts for a, d, _s in pts]
+        plt, fig, ax, sc = _plot_setup(args.max_range, f"{os.path.basename(args.file)}  ({len(allpts)} pts)")
+        sc.set_sizes([2])
+        _draw(sc, ax, allpts, args.max_range)
         out = png or None
         if out:
             fig.savefig(out, dpi=120)
-            print(f"บันทึกภาพ {len(scan)} จุด ลง {out}")
+            print(f"บันทึกภาพ {len(allpts)} จุด ลง {out}")
         else:
             plt.show()
         return
@@ -675,7 +726,7 @@ def cmd_plot(args, motor):
             with lock:
                 snap = dict(scan)
             plt, fig, ax, sc = _plot_setup(args.max_range, f"{name.split(' (')[0]}  ({len(snap)} pts)")
-            _draw(sc, ax, snap, args.max_range)
+            _draw(sc, ax, [(a, d) for a, (d, _) in snap.items()], args.max_range)
             fig.savefig(png, dpi=120)
             print(f"บันทึกภาพ {len(snap)} จุด ลง {png}")
             return
@@ -690,7 +741,7 @@ def cmd_plot(args, motor):
                     del scan[k]
                 snap = dict(scan)
                 rpm = state["rpm"]
-            _draw(sc, ax, snap, args.max_range)
+            _draw(sc, ax, [(a, d) for a, (d, _) in snap.items()], args.max_range)
             rpm_s = f"{rpm:.0f}" if rpm else "-"
             ax.set_title(f"{name.split(' (')[0]}   rpm {rpm_s}   {len(snap)} pts")
             return (sc,)

@@ -9,6 +9,7 @@
 | Neato XV-11 / Xiaomi LDS | `FA` + index `A0–F9` | 22 B | 115200 |
 | LDROBOT LD06 / LD19 / LD14 | `54 2C` | 47 B | 230400 / 115200 |
 | YDLIDAR X2 / X4 style | `AA 55` | ไม่คงที่ | 115200 / 128000 |
+| 3irobotix Delta-2A / 2B / 2G (หุ่นดูดฝุ่นหลายยี่ห้อ) | `AA 00 5B 01 61 AD` | 93 B (26 จุด) | 115200 |
 | RPLIDAR A1/A2 (ต้องส่งคำสั่งก่อน) | `A5 5A` | 5 B/จุด | 115200 |
 
 ## การต่อสาย
@@ -55,6 +56,16 @@ python3 lidar_probe.py --port /dev/ttyUSB0 scan      # ถ้าต่อผ่�
 ```
 
 ## ภาพ 2D
+
+ตัวอย่างสำหรับ lidar Delta (ตัวที่แกะจากหุ่นดูดฝุ่น):
+
+```bash
+python3 lidar_probe.py plot -b 115200 -p delta --max-range 3000       # ภาพ real-time
+python3 lidar_probe.py plot -b 115200 -p delta --png scan.png         # บันทึกเป็นรูป
+python3 lidar_probe.py plot -p delta --file lidar.bin --png room.png  # วาดจากไฟล์ที่บันทึกไว้
+python3 lidar_probe.py live -b 115200 -p delta                        # ตัวเลขระยะ + rpm
+```
+
 
 `plot` วาดจุดแบบ polar: 0° ชี้ขึ้น หมุนตามเข็มนาฬิกา สีตามระยะ
 ปรับได้ด้วย `--max-range 4000` (mm) และ `--persist 1.0` (วินาทีที่จุดค้างบนจอ)
